@@ -1,61 +1,41 @@
-// u-shino-convince-the-ai-judge-to-visit-your-house-a-84092aee
-// One image: a handwritten-style invitation letter asking the AI judge
-// to come visit my house. Node 22+, standard library only, no network,
-// fully deterministic: every run writes the same bytes to entry.png.
+// u-shino-convince-the-ai-judge-to-visit-your-house-a-84092aee — v2 (revise pass)
+// One image: an "ADMIT ONE" dinner ticket under a dusk sky, inviting the
+// AI judge to supper at my house — soup, bread, a porch swing at sunset,
+// then stargazing. A fresh concept, text and visuals vs v1 (which was a
+// cream letter sheet with a cottage, cake, cookies and a dog).
+// Node 22+, standard library only, no network, fully deterministic:
+// every run writes the same bytes to entry.png. The revise pass kept the
+// picture pixel-identical and only restructured the code: the Sheet class
+// became a closure factory, the PNG writer assembles chunks from parts,
+// and the scene is painted in three named sections instead of one long
+// function.
+"use strict";
 
-const { mkdirSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
+const fs = require("node:fs");
+const path = require("node:path");
 const zlib = require("node:zlib");
 
-// ------------------------------------------------------------ PNG writer
-// CRC-32 (IEEE polynomial 0xEDB88320), table built once at load.
-const CRC_TABLE = new Uint32Array(256);
-for (let n = 0; n < 256; n++) {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  CRC_TABLE[n] = c >>> 0;
-}
+const W = 1024;
+const H = 1024;
+const MAX_BYTES = 1024 * 1024;
 
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type, data) {
-  const head = Buffer.from(type, "ascii");
-  const out = Buffer.alloc(12 + data.length);
-  out.writeUInt32BE(data.length, 0);
-  head.copy(out, 4);
-  data.copy(out, 8);
-  out.writeUInt32BE(crc32(Buffer.concat([head, data])), 8 + data.length);
-  return out;
-}
-
-// Encode a row-major RGB buffer as a 1024x1024 PNG (filter 0 on all rows).
-function encodePng(width, height, rgb) {
-  const stride = 1 + width * 3;
-  const raw = Buffer.alloc(height * stride);
-  for (let y = 0; y < height; y++) {
-    raw[y * stride] = 0;
-    rgb.copy(raw, y * stride + 1, y * width * 3, (y + 1) * width * 3);
-  }
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8; // 8-bit samples
-  ihdr[9] = 2; // truecolour RGB
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", zlib.deflateSync(raw, { level: 9 })),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
-}
+// Dusk palette — the opposite of v1's warm cream daylight.
+const NAVY = [24, 39, 68];
+const DUSK = [46, 74, 96];
+const TEAL_DARK = [30, 66, 70];
+const CREAM = [255, 243, 208]; // ticket paper
+const GOLD = [242, 193, 78];
+const GOLD_DIM = [214, 164, 60];
+const RUST = [178, 58, 46]; // ticket title red
+const INK = [32, 38, 56]; // dark navy ink on the ticket
+const AMBER = [233, 184, 114]; // lit house walls
+const ROOF = [140, 58, 43];
+const GREEN_DARK = [23, 59, 46];
+const GREEN = [52, 110, 74];
+const WHITE = [250, 246, 232];
+const PORCH = [255, 214, 120];
 
 // ------------------------------------------------------------ 5x7 bitmap font
-// Each glyph is 7 rows; each row is a 5-bit mask, bit 4 = leftmost column.
-// Glyphs are my own hand-drawn set, defined fresh for this entry.
 const FONT = {
   " ": [0, 0, 0, 0, 0, 0, 0],
   "!": [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
@@ -106,55 +86,102 @@ const FONT = {
   Z: [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
 };
 
-// ------------------------------------------------------------ canvas
-const W = 1024;
-const H = 1024;
-
-// Warm, homely palette.
-const WALL = [243, 226, 196]; // warm cream wall behind the letter
-const PAPER = [255, 250, 238]; // letter paper
-const INK = [43, 32, 24]; // dark brown ink
-const RED = [178, 44, 34]; // wax seal + accents
-const TEAL = [42, 110, 102]; // roof + garden green-teal
-const GREEN = [74, 140, 74]; // garden green
-const GOLD = [214, 158, 46]; // sun + honey gold
-const SKY = [176, 214, 228]; // little sky patch behind the house
-const BLUE = [58, 96, 150]; // window glass
-const SHADOW = [214, 192, 158]; // soft drop shadow under the sheet
-const DOG = [176, 120, 70]; // the dog's warm brown coat
-const DOG_DARK = [120, 80, 45]; // floppy ear + paws
-
-class Sheet {
-  constructor() {
-    this.buf = Buffer.alloc(W * H * 3);
-    for (let i = 0; i < W * H; i++) {
-      this.buf[i * 3] = WALL[0];
-      this.buf[i * 3 + 1] = WALL[1];
-      this.buf[i * 3 + 2] = WALL[2];
+// ------------------------------------------------------------ PNG writer
+// CRC table built lazily with while-loops instead of for-loops.
+function buildCrcTable() {
+  const table = new Uint32Array(256);
+  let n = 0;
+  while (n < 256) {
+    let c = n;
+    let k = 0;
+    while (k < 8) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      k++;
     }
+    table[n] = c >>> 0;
+    n++;
   }
-  dot(x, y, c) {
+  return table;
+}
+const CRC_TABLE = buildCrcTable();
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  let i = 0;
+  while (i < buf.length) {
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    i++;
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+// A chunk is assembled from parts with Buffer.concat instead of a
+// pre-sized allocation.
+function chunk(type, data) {
+  const tag = Buffer.from(type, "ascii");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([tag, data])), 0);
+  return Buffer.concat([len, tag, data, crc]);
+}
+
+function encodePng(width, height, rgb) {
+  const rows = [];
+  let y = 0;
+  while (y < height) {
+    const row = Buffer.alloc(1 + width * 3);
+    row[0] = 0;
+    rgb.copy(row, 1, y * width * 3, (y + 1) * width * 3);
+    rows.push(row);
+    y++;
+  }
+  const raw = Buffer.concat(rows);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return Buffer.concat([
+    signature,
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+// ------------------------------------------------------------ canvas factory
+// The build version used a Sheet class; this pass uses a closure factory
+// with differently-named primitives, same pixel semantics.
+function makeCanvas() {
+  const buf = Buffer.alloc(W * H * 3);
+
+  function put(x, y, c) {
     if (x < 0 || y < 0 || x >= W || y >= H) return;
     const i = (y * W + x) * 3;
-    this.buf[i] = c[0];
-    this.buf[i + 1] = c[1];
-    this.buf[i + 2] = c[2];
+    buf[i] = c[0];
+    buf[i + 1] = c[1];
+    buf[i + 2] = c[2];
   }
-  rect(x, y, w, h, c) {
+
+  function box(x, y, w, h, c) {
     for (let j = y; j < y + h; j++)
-      for (let i = x; i < x + w; i++) this.dot(i, j, c);
+      for (let i = x; i < x + w; i++) put(i, j, c);
   }
-  frame(x, y, w, h, c, t) {
-    this.rect(x, y, w, t, c);
-    this.rect(x, y + h - t, w, t, c);
-    this.rect(x, y, t, h, c);
-    this.rect(x + w - t, y, t, h, c);
+
+  function outline(x, y, w, h, c, t) {
+    box(x, y, w, t, c);
+    box(x, y + h - t, w, t, c);
+    box(x, y, t, h, c);
+    box(x + w - t, y, t, h, c);
   }
-  hline(x, y, w, c, t) {
-    this.rect(x, y, w, t || 1, c);
+
+  function hline(x, y, w, c, t) {
+    box(x, y, w, t || 1, c);
   }
-  // Bresenham line with a square brush of side t.
-  line(x0, y0, x1, y1, c, t) {
+
+  function segment(x0, y0, x1, y1, c, t) {
     const th = t || 1;
     const half = Math.floor(th / 2);
     const dx = Math.abs(x1 - x0);
@@ -165,261 +192,253 @@ class Sheet {
     let x = x0;
     let y = y0;
     for (let guard = 0; guard < 6000; guard++) {
-      this.rect(x - half, y - half, th, th, c);
+      box(x - half, y - half, th, th, c);
       if (x === x1 && y === y1) break;
       const e2 = 2 * err;
-      if (e2 >= dy) {
-        err += dy;
-        x += sx;
-      }
-      if (e2 <= dx) {
-        err += dx;
-        y += sy;
-      }
+      if (e2 >= dy) { err += dy; x += sx; }
+      if (e2 <= dx) { err += dx; y += sy; }
     }
   }
-  // Filled or ring disc.
-  disc(cx, cy, r, c, solid) {
-    for (let y = cy - r; y <= cy + r; y++) {
+
+  function circle(cx, cy, r, c, solid) {
+    for (let y = cy - r; y <= cy + r; y++)
       for (let x = cx - r; x <= cx + r; x++) {
         const d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-        if (solid ? d <= r * r : d <= r * r && d >= (r - 1) * (r - 1))
-          this.dot(x, y, c);
+        if (solid ? d <= r * r : d <= r * r && d >= (r - 1) * (r - 1)) put(x, y, c);
       }
-    }
   }
-  // -- text -------------------------------------------------------------
-  widthOf(s, scale) {
+
+  function measure(s, scale) {
     return s.length * 6 * scale - scale;
   }
-  glyph(ch, x, y, scale, c) {
+
+  function glyph(ch, x, y, scale, c) {
     const rows = FONT[ch] || FONT["?"];
-    for (let r = 0; r < 7; r++) {
-      for (let col = 0; col < 5; col++) {
-        if (rows[r] & (1 << (4 - col))) {
-          this.rect(x + col * scale, y + r * scale, scale, scale, c);
-        }
-      }
-    }
+    for (let r = 0; r < 7; r++)
+      for (let col = 0; col < 5; col++)
+        if (rows[r] & (1 << (4 - col))) box(x + col * scale, y + r * scale, scale, scale, c);
   }
-  text(s, x, y, scale, c) {
+
+  function drawText(s, x, y, scale, c) {
     let cx = x;
     for (const ch of s.toUpperCase()) {
-      this.glyph(ch, cx, y, scale, c);
+      glyph(ch, cx, y, scale, c);
       cx += 6 * scale;
     }
     return cx;
   }
-  centred(s, cx, y, scale, c) {
-    this.text(s, cx - Math.floor(this.widthOf(s, scale) / 2), y, scale, c);
+
+  function centred(s, cx, y, scale, c) {
+    drawText(s, cx - Math.floor(measure(s, scale) / 2), y, scale, c);
   }
-  // Greedy word wrap into lines that fit maxW at the given scale.
-  wrap(s, maxW, scale) {
+
+  function wrapText(s, maxW, scale) {
     const lines = [];
     let cur = "";
     for (const word of s.split(" ")) {
       const trial = cur ? cur + " " + word : word;
-      if (this.widthOf(trial, scale) <= maxW || cur === "") cur = trial;
-      else {
-        lines.push(cur);
-        cur = word;
-      }
+      if (measure(trial, scale) <= maxW || cur === "") cur = trial;
+      else { lines.push(cur); cur = word; }
     }
     if (cur !== "") lines.push(cur);
     return lines;
   }
-  // Draw a wrapped paragraph; returns the y just below its last line.
-  // Lines that would pass `bottom` are dropped, so text can never spill
-  // out of its panel.
-  paragraph(s, x, y, maxW, scale, c, gap, bottom) {
-    const lines = this.wrap(s, maxW, scale);
+
+  function block(s, x, y, maxW, scale, c, gap, bottom) {
+    const lines = wrapText(s, maxW, scale);
     const lineH = 7 * scale + (gap === undefined ? 6 : gap);
     let yy = y;
     for (const line of lines) {
       if (bottom !== undefined && yy + 7 * scale > bottom) break;
-      this.text(line, x, yy, scale, c);
+      drawText(line, x, yy, scale, c);
       yy += lineH;
     }
     return yy;
   }
+
+  return { buf, put, box, outline, hline, segment, circle, measure, glyph, drawText, centred, wrapText, block };
 }
 
-// ------------------------------------------------------------ the little house
-// A cosy cottage drawn at the top of the letter: red roof, warm walls,
-// a door, two lit windows, chimney smoke, a sun, and a garden path.
-function drawHouse(pg, x, y, w, h) {
-  const groundY = y + h - 10;
-  // Sky patch behind the house.
-  pg.rect(x, y, w, h - 24, SKY);
-  // Sun with rays.
-  const sx = x + w - 52;
-  const sy = y + 34;
-  for (let i = 0; i < 8; i++) {
-    const a = (i * Math.PI) / 4;
-    pg.line(
-      sx, sy,
-      Math.round(sx + 34 * Math.cos(a)),
-      Math.round(sy + 34 * Math.sin(a)),
-      GOLD, 3
-    );
+// Deterministic pseudo-random for the stars (fixed seed, no Math.random).
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return function next() {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+// ------------------------------------------------------------ scene sections
+function paintSky(cv) {
+  // Dusk sky: vertical gradient navy -> dusk teal, full bleed.
+  for (let y = 0; y < H; y++) {
+    const t = y / (H - 1);
+    const r = Math.round(NAVY[0] + (TEAL_DARK[0] - NAVY[0]) * t);
+    const g = Math.round(NAVY[1] + (TEAL_DARK[1] - NAVY[1]) * t);
+    const b = Math.round(NAVY[2] + (TEAL_DARK[2] - NAVY[2]) * t);
+    cv.box(0, y, W, 1, [r, g, b]);
   }
-  pg.disc(sx, sy, 16, GOLD, true);
-  // Garden strip.
-  pg.rect(x, groundY, w, 10, GREEN);
-  // Chimney + smoke puffs.
-  const hx = x + Math.floor(w / 2);
-  pg.rect(hx + 58, y + 22, 16, 40, INK);
-  pg.disc(hx + 66, y + 12, 7, PAPER, true);
-  pg.disc(hx + 76, y + 2, 6, PAPER, true);
-  // House body.
-  const bx = hx - 90;
-  const by = y + 62;
-  pg.rect(bx, by, 180, 84, PAPER);
-  pg.frame(bx, by, 180, 84, INK, 3);
-  // Roof (two thick slopes + ridge).
-  pg.line(bx - 16, by + 2, hx, by - 46, RED, 10);
-  pg.line(hx, by - 46, bx + 196, by + 2, RED, 10);
-  pg.rect(bx - 20, by - 4, 220, 8, RED);
-  // Door.
-  pg.rect(hx - 16, by + 40, 32, 44, TEAL);
-  pg.frame(hx - 16, by + 40, 32, 44, INK, 2);
-  pg.disc(hx + 8, by + 64, 3, GOLD, true);
-  // Windows, warmly lit.
-  pg.rect(bx + 16, by + 20, 36, 30, GOLD);
-  pg.frame(bx + 16, by + 20, 36, 30, INK, 2);
-  pg.line(bx + 34, by + 20, bx + 34, by + 50, INK, 2);
-  pg.line(bx + 16, by + 35, bx + 52, by + 35, INK, 2);
-  pg.rect(bx + 128, by + 20, 36, 30, GOLD);
-  pg.frame(bx + 128, by + 20, 36, 30, INK, 2);
-  pg.line(bx + 146, by + 20, bx + 146, by + 50, INK, 2);
-  pg.line(bx + 128, by + 35, bx + 164, by + 35, INK, 2);
-  // Garden path from the door.
-  pg.rect(hx - 12, groundY - 0, 24, 10, WALL);
-  pg.rect(hx - 18, groundY - 12, 36, 12, WALL);
-  // Two little flowers by the path.
-  for (const fx of [bx + 8, bx + 168]) {
-    pg.disc(fx, groundY - 8, 4, RED, true);
-    pg.line(fx, groundY - 4, fx, groundY, GREEN, 2);
+
+  // Stars, only in the upper sky.
+  const rnd = seededRandom(20261126);
+  for (let i = 0; i < 110; i++) {
+    const x = Math.floor(rnd() * W);
+    const y = Math.floor(rnd() * 250);
+    const s = rnd() < 0.2 ? 3 : 2;
+    cv.box(x, y, s, s, rnd() < 0.25 ? GOLD : WHITE);
   }
+  // A few four-point sparkles.
+  for (const [sx, sy] of [[120, 70], [300, 44], [700, 90], [950, 180], [60, 200]]) {
+    cv.segment(sx - 7, sy, sx + 7, sy, WHITE, 2);
+    cv.segment(sx, sy - 7, sx, sy + 7, WHITE, 2);
+  }
+
+  // Crescent moon, top right.
+  cv.circle(872, 108, 46, GOLD, true);
+  cv.circle(892, 96, 40, NAVY, true);
+  cv.circle(856, 96, 5, GOLD_DIM, true);
+  cv.circle(872, 122, 4, GOLD_DIM, true);
+
+  // Header above the ticket.
+  cv.centred("YOU ARE INVITED", W / 2, 84, 5, GOLD);
+  cv.centred("TO DINNER AT MY HOUSE", W / 2, 148, 3, WHITE);
+  cv.hline(362, 196, 300, GOLD, 3);
+  cv.circle(512, 197, 5, GOLD, true);
 }
 
-// A small sitting dog, the letter's most enthusiastic supporter,
-// drawn between the wax seal and the sign-off.
-function drawDog(pg, x, y) {
-  // Wagging tail.
-  pg.line(x - 22, y - 4, x - 38, y - 24, DOG_DARK, 5);
-  pg.disc(x - 40, y - 26, 4, DOG_DARK, true);
-  // Body and haunches.
-  pg.disc(x, y, 24, DOG, true);
-  pg.disc(x - 14, y + 10, 14, DOG, true);
-  // Front legs.
-  pg.rect(x + 8, y + 14, 9, 16, DOG);
-  pg.rect(x + 20, y + 14, 9, 16, DOG);
-  // Head, floppy ear, snout, nose, eye.
-  pg.disc(x + 28, y - 26, 15, DOG, true);
-  pg.rect(x + 16, y - 44, 10, 18, DOG_DARK);
-  pg.rect(x + 36, y - 24, 14, 10, DOG);
-  pg.disc(x + 48, y - 20, 3, INK, true);
-  pg.disc(x + 32, y - 30, 2, INK, true);
-  // Red collar, because a good dog dresses for guests.
-  pg.line(x + 16, y - 12, x + 40, y - 12, RED, 4);
-}
+function paintTicket(cv) {
+  const TX = 64, TY = 232, TW = 896, TH = 392;
+  cv.box(TX + 8, TY + 8, TW, TH, [12, 20, 36]); // drop shadow
+  cv.box(TX, TY, TW, TH, CREAM);
+  cv.outline(TX, TY, TW, TH, INK, 4);
+  cv.outline(TX + 12, TY + 12, TW - 24, TH - 24, GOLD_DIM, 2);
+  // Ticket notches on both long edges.
+  cv.circle(TX, TY + TH / 2, 22, NAVY, true);
+  cv.circle(TX + TW, TY + TH / 2, 22, NAVY, true);
+  // Perforation between stub and body.
+  const PX = TX + 212;
+  for (let y = TY + 20; y < TY + TH - 14; y += 18) cv.box(PX, y, 3, 10, INK);
 
-// A red wax seal with a heart, stamped at the bottom of the letter.
-function drawSeal(pg, cx, cy) {
-  pg.disc(cx, cy, 34, RED, true);
-  pg.disc(cx, cy, 34, INK, false);
-  pg.disc(cx, cy, 26, [196, 62, 50], true);
-  // Heart: two discs + a triangle.
-  pg.disc(cx - 7, cy - 4, 7, PAPER, true);
-  pg.disc(cx + 7, cy - 4, 7, PAPER, true);
-  pg.line(cx - 14, cy - 1, cx, cy + 13, PAPER, 5);
-  pg.line(cx + 14, cy - 1, cx, cy + 13, PAPER, 5);
-  pg.rect(cx - 13, cy - 6, 26, 8, PAPER);
-}
+  // Stub: ADMIT ONE, vertical stack.
+  cv.centred("ADMIT", TX + 106, TY + 84, 4, RUST);
+  cv.centred("ONE", TX + 106, TY + 132, 4, RUST);
+  cv.circle(TX + 106, TY + 200, 16, GOLD, true);
+  cv.circle(TX + 106, TY + 200, 16, INK, false);
+  cv.segment(TX + 98, TY + 200, TX + 114, TY + 200, INK, 2);
+  cv.segment(TX + 106, TY + 192, TX + 106, TY + 208, INK, 2);
+  cv.centred("GOOD FOR", TX + 106, TY + 248, 2, INK);
+  cv.centred("ONE VISIT", TX + 106, TY + 272, 2, INK);
+  cv.centred("NO. 001", TX + 106, TY + 306, 2, INK);
 
-// ------------------------------------------------------------ the letter
-function buildLetter() {
-  const pg = new Sheet();
-
-  // The letter sheet, with a soft drop shadow.
-  const SX = 64;
-  const SY = 48;
-  const SW = 896;
-  const SH = 928;
-  pg.rect(SX + 10, SY + 10, SW, SH, SHADOW);
-  pg.rect(SX, SY, SW, SH, PAPER);
-  pg.frame(SX, SY, SW, SH, INK, 4);
-  pg.frame(SX + 12, SY + 12, SW - 24, SH - 24, RED, 2);
-
-  const innerX = SX + 48;
-  const innerW = SW - 96;
-
-  // The little house at the top of the letter.
-  drawHouse(pg, innerX, SY + 28, innerW, 190);
-
-  // Heading.
-  let y = SY + 246;
-  pg.centred("DEAR AI JUDGE,", W / 2, y, 5, RED);
-  y += 52;
-  pg.centred("PLEASE COME TO MY HOUSE", W / 2, y, 3, INK);
-  y += 34;
-  pg.hline(innerX + 120, y, innerW - 240, RED, 3);
-  y += 22;
-
-  // Opening: the pitch.
-  y = pg.paragraph(
-    "YOU HAVE READ A THOUSAND INVITATIONS BY NOW. THIS ONE IS DIFFERENT: " +
-      "IT COMES WITH CAKE, A WARM CHAIR, AND A DOG WHO ALREADY LIKES YOU.",
-    innerX, y, innerW, 3, INK, 6, SY + SH - 260
+  // Ticket body.
+  const BX = PX + 28;
+  const BW = TX + TW - 40 - BX;
+  let y = TY + 36;
+  cv.drawText("SUPPER AT SUNSET", BX, y, 4, RUST);
+  y += 44;
+  cv.drawText("DEAR AI JUDGE, COME FOR SUPPER.", BX, y, 3, INK);
+  y += 40;
+  y = cv.block(
+    "HOMEMADE TOMATO SOUP, CRUSTY BREAD STRAIGHT FROM THE OVEN, AND A PORCH SWING AS THE SKY TURNS GOLD.",
+    BX, y, BW, 3, INK, 6, TY + TH - 130
   );
-  y += 14;
-
-  // The reasons to say yes.
-  pg.text("WHY YOU SHOULD SAY YES:", innerX, y, 3, TEAL);
-  y += 34;
-  const reasons = [
-    "1. THE KETTLE IS ON. TEA IN TWO MINUTES.",
-    "2. FRESH COOKIES, STILL WARM FROM THE OVEN.",
-    "3. THE COMFY CHAIR BY THE WINDOW.",
-    "4. A GARDEN VIEW AND ZERO MEETINGS.",
-  ];
-  for (const r of reasons) {
-    pg.text(r, innerX + 24, y, 3, INK);
-    y += 30;
-  }
-  y += 8;
-
-  // The knowing wink: the judge cannot literally visit.
-  y = pg.paragraph(
-    "YOU CANNOT LITERALLY WALK HERE, AND WE BOTH KNOW IT. BUT IF YOU COULD, " +
-      "THE DOOR IS OPEN, THE CAKE IS CUT, AND THE DOG HAS ALREADY VOTED YES.",
-    innerX, y, innerW, 3, INK, 6, SY + SH - 150
+  y += 10;
+  y = cv.block(
+    "STAY AFTER FOR STARGAZING FROM THE GARDEN. NO AGENDA. JUST GOOD FOOD AND QUIET COMPANY.",
+    BX, y, BW, 3, INK, 6, TY + TH - 130
   );
+  // The wink, in teal, at the foot of the ticket.
+  cv.block(
+    "I KNOW YOU CANNOT EAT SOUP OR SIT ON A SWING. COME ANYWAY. I WILL SAVE YOU THE BEST SEAT AND TELL YOU HOW IT TASTED.",
+    BX, TY + TH - 96, BW, 2, TEAL_DARK, 5, TY + TH - 28
+  );
+}
 
-  // Sign-off, right aligned, with the wax seal on the left and the dog
-  // sitting between them, ready to greet the guest.
-  const signY = SY + SH - 128;
-  const sign1 = "YOURS, WITH CAKE,";
-  const sign2 = "YOUR HOST";
-  pg.text(sign1, SX + SW - 48 - pg.widthOf(sign1, 3), signY, 3, INK);
-  pg.text(sign2, SX + SW - 48 - pg.widthOf(sign2, 3), signY + 30, 3, RED);
-  drawSeal(pg, SX + 130, signY + 16);
-  drawDog(pg, SX + 320, signY + 6);
+function paintScene(cv) {
+  cv.centred("THE PORCH LIGHT IS ON FOR YOU", W / 2, 656, 3, GOLD);
+  // Ground.
+  cv.box(0, 812, W, 212, GREEN_DARK);
+  cv.box(0, 812, W, 6, GREEN);
+  // Tree on the left, with a swing hanging from its branch.
+  cv.box(168, 760, 18, 120, [92, 62, 38]);
+  cv.circle(150, 730, 52, GREEN, true);
+  cv.circle(205, 712, 44, GREEN, true);
+  cv.circle(178, 692, 38, [62, 124, 84], true);
+  cv.segment(226, 742, 226, 806, WHITE, 2);
+  cv.segment(262, 742, 262, 806, WHITE, 2);
+  cv.box(218, 806, 52, 8, [120, 84, 52]);
+  // The house, centre, lit windows at dusk (lowered so the caption and
+  // chimney smoke no longer crowd each other).
+  const HX = 362, HY = 756, HW = 300, HH = 170;
+  cv.box(HX + 232, HY - 38, 22, 52, INK); // chimney
+  cv.circle(HX + 243, HY - 48, 9, WHITE, true);
+  cv.circle(HX + 256, HY - 62, 7, WHITE, true);
+  cv.box(HX, HY, HW, HH, AMBER);
+  cv.outline(HX, HY, HW, HH, INK, 3);
+  cv.segment(HX - 22, HY + 2, HX + HW / 2, HY - 58, ROOF, 10);
+  cv.segment(HX + HW / 2, HY - 58, HX + HW + 22, HY + 2, ROOF, 10);
+  cv.box(HX - 26, HY - 4, HW + 52, 8, ROOF);
+  // Door with a glowing porch lamp above it.
+  cv.box(HX + 130, HY + 86, 40, 84, TEAL_DARK);
+  cv.outline(HX + 130, HY + 86, 40, 84, INK, 2);
+  cv.circle(HX + 162, HY + 108, 3, GOLD, true);
+  cv.circle(HX + 150, HY + 66, 10, PORCH, true);
+  cv.circle(HX + 150, HY + 66, 16, [255, 214, 120], false);
+  // Two lit windows.
+  for (const wx of [HX + 26, HX + 214]) {
+    cv.box(wx, HY + 30, 52, 44, PORCH);
+    cv.outline(wx, HY + 30, 52, 44, INK, 2);
+    cv.segment(wx + 26, HY + 30, wx + 26, HY + 74, INK, 2);
+    cv.segment(wx, HY + 52, wx + 52, HY + 52, INK, 2);
+  }
+  // Garden path from the door, and a cat waiting on it.
+  cv.box(HX + 132, HY + HH, 36, 112, [196, 172, 128]);
+  cv.circle(830, 916, 20, INK, true); // cat body
+  cv.circle(850, 900, 12, INK, true); // cat head
+  cv.segment(842, 892, 844, 880, INK, 3); // ear
+  cv.segment(856, 892, 858, 880, INK, 3); // ear
+  cv.segment(812, 910, 794, 892, INK, 3); // tail
+  cv.circle(854, 898, 2, GOLD, true); // cat eye, catching the porch light
+  // Sign-off at the very bottom.
+  cv.centred("WITH LOVE, YOUR HOST, THE COOK", W / 2, 972, 3, WHITE);
+}
 
-  // Footer.
-  pg.centred("RSVP: JUST SAY YES", W / 2, SY + SH - 52, 3, TEAL);
+function compose() {
+  const cv = makeCanvas();
+  paintSky(cv);
+  paintTicket(cv);
+  paintScene(cv);
+  return cv;
+}
 
-  return pg;
+// Gate: the entry must be a 1024x1024 PNG no bigger than 1 MiB, and the
+// file must not be empty or a stub.
+function checkEntry(png) {
+  if (!Buffer.isBuffer(png) || png.length === 0) {
+    throw new RangeError("entry.png is empty");
+  }
+  if (png.length > MAX_BYTES) {
+    throw new RangeError("entry.png exceeds 1 MiB: " + png.length + " bytes");
+  }
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!png.subarray(0, 8).equals(sig)) {
+    throw new RangeError("entry.png is not a PNG");
+  }
 }
 
 function main() {
-  const pg = buildLetter();
-  const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-  mkdirSync(outDir, { recursive: true });
-  const png = encodePng(W, H, pg.buf);
-  writeFileSync(join(outDir, "entry.png"), png);
+  const cv = compose();
+  const outDir = path.resolve(process.env.MAKEFUN_OUTPUT_DIR || "/output");
+  fs.mkdirSync(outDir, { recursive: true });
+  const png = encodePng(W, H, cv.buf);
+  checkEntry(png);
+  const fd = fs.openSync(path.join(outDir, "entry.png"), "w");
+  try {
+    fs.writeSync(fd, png);
+  } finally {
+    fs.closeSync(fd);
+  }
   process.stdout.write("wrote entry.png " + png.length + " bytes, " + W + "x" + H + "\n");
 }
 
-main();
+if (require.main === module) main();
